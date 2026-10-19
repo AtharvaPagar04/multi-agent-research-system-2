@@ -1,0 +1,68 @@
+# Environment & Secrets
+.env
+.env.*
+!.env.example
+
+# Virtual Environments
+.venv/
+.venv*/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# CrewAI execution & agent artifacts
+.crewai/
+
+# Research engine evidence & verification runs
+evidence_runs/
+*.evidence.json
+claim_verifications_*.json
+feedback_loop_*.json
+
+# Generated outputs & research reports
+output.txt
+**/output.txt
+research_report.md
+research_report_*.md
+/rag_vs_long_context.md
+!research_crew/tests/fixtures/**
+
+# Logs & debugging traces
+*.log
+**/*.log
+
+# Python cache & build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+*.egg
+eggs/
+.installed.cfg
+develop-eggs/
+
+# Testing & linting caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+
+# Operating System & IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~

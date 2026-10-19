@@ -1,0 +1,9 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Backend API — Python Dependencies (FastAPI service layer)
+# Install (uv):  uv pip install --python .venv313/bin/python -r backend/requirements.txt
+# Python:  >= 3.10 (developed against 3.13)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── HTTP API ─────────────────────────────────────────────────────────────────
+fastapi>=0.145.0
+uvicorn>=0.54.0

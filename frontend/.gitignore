@@ -1,0 +1,6 @@
+# Frontend-local ignores (the repository root also has a general .gitignore).
+node_modules/
+.next/
+out/
+.test-build/
+.env*.local
