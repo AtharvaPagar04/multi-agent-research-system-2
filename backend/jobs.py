@@ -28,6 +28,7 @@ Nothing is launched at import time; a manager must be constructed and
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import subprocess
@@ -41,6 +42,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
+
+logger = logging.getLogger(__name__)
 
 from backend.config import (
     OPTIONAL_ENGINE_ENV,
@@ -195,6 +198,7 @@ class JobManager:
         env: Optional[Mapping[str, str]] = None,
         popen_factory: Optional[Callable[..., Any]] = None,
         monotonic: Optional[Callable[[], float]] = None,
+        db: Optional[Any] = None,
     ) -> None:
         self._settings = settings
         self._repo_root = Path(repo_root).resolve()
@@ -202,6 +206,7 @@ class JobManager:
         self._base_env = dict(os.environ if env is None else env)
         self._popen = popen_factory if popen_factory is not None else subprocess.Popen
         self._monotonic = monotonic if monotonic is not None else time.monotonic
+        self._db = db
         self._lock = threading.Condition()
         self._jobs: dict[str, _Job] = {}
         self._order: list[str] = []
@@ -222,6 +227,9 @@ class JobManager:
             if self._shutdown:
                 raise ManagerShutdownError("job manager is shut down")
             self._started = True
+        if self._db is not None:
+            self._db.init_db()
+            self._db.recover_stale_jobs()
 
     def shutdown(self, timeout: Optional[float] = None) -> None:
         """Stop accepting work and terminate all queued and active jobs.
@@ -230,6 +238,7 @@ class JobManager:
         children are terminated (graceful TERM, then KILL after the
         configured grace period). Idempotent.
         """
+        cancelled_queue_jobs: list[_Job] = []
         with self._lock:
             if self._shutdown:
                 return
@@ -242,12 +251,27 @@ class JobManager:
                 job.stage = "cancelled"
                 job.error = "manager shut down before the job started"
                 job.finished_at = now
+                cancelled_queue_jobs.append(job)
             self._queue.clear()
             for job in self._jobs.values():
                 if job.state in (JobState.STARTING, JobState.RUNNING):
                     job.shutdown_requested.set()
             threads = list(self._threads)
             self._lock.notify_all()
+
+        if self._db is not None:
+            for job in cancelled_queue_jobs:
+                try:
+                    self._db.record_job_completed(
+                        job.job_id,
+                        status=job.state.value,
+                        completed_at=job.finished_at,
+                        error=job.error,
+                        failure_kind=job.failure_kind,
+                        stage=job.stage,
+                    )
+                except Exception as exc:
+                    logger.warning("Failed to record shutdown cancellation in DB: %s", exc)
 
         wait_seconds = (
             timeout if timeout is not None else self._settings.kill_grace_seconds + 5.0
@@ -294,6 +318,17 @@ class JobManager:
             self._jobs[job.job_id] = job
             self._order.append(job.job_id)
             self._queue.append(job.job_id)
+            if self._db is not None:
+                try:
+                    self._db.record_job_submitted(
+                        job.job_id,
+                        job.topic,
+                        status=job.state.value,
+                        created_at=job.created_at,
+                        stage=job.stage,
+                    )
+                except Exception as exc:
+                    logger.warning("Failed to record job submission in DB: %s", exc)
             self._dispatch_locked()
             return job.job_id
 
@@ -301,12 +336,33 @@ class JobManager:
         """Return a redacted snapshot of one job, or None if unknown."""
         with self._lock:
             job = self._jobs.get(job_id)
-            return None if job is None else self._view_locked(job)
+            if job is not None:
+                return self._view_locked(job)
+        if self._db is not None:
+            try:
+                db_job = self._db.get_job(job_id)
+                if db_job is not None:
+                    return db_job
+                db_by_run = self._db.get_job_by_run_id(job_id)
+                if db_by_run is not None:
+                    return db_by_run
+            except Exception as exc:
+                logger.warning("Failed to fetch job %s from DB: %s", job_id, exc)
+        return None
 
     def list_jobs(self) -> list[dict]:
         """Return redacted snapshots of all jobs in submission order."""
         with self._lock:
-            return [self._view_locked(self._jobs[job_id]) for job_id in self._order]
+            mem_jobs = [self._view_locked(self._jobs[job_id]) for job_id in self._order]
+            seen_ids = set(self._order)
+        if self._db is not None:
+            try:
+                db_jobs = self._db.list_jobs(limit=100)
+                historical = [j for j in db_jobs if j["job_id"] not in seen_ids]
+                return mem_jobs + historical
+            except Exception as exc:
+                logger.warning("Failed to list jobs from DB: %s", exc)
+        return mem_jobs
 
     def cancel(self, job_id: str) -> bool:
         """Request cancellation. Returns False for unknown/terminal jobs."""
@@ -321,6 +377,18 @@ class JobManager:
                 job.stage = "cancelled"
                 job.error = "cancelled before start"
                 job.finished_at = time.time()
+                if self._db is not None:
+                    try:
+                        self._db.record_job_completed(
+                            job.job_id,
+                            status=job.state.value,
+                            completed_at=job.finished_at,
+                            error=job.error,
+                            failure_kind=job.failure_kind,
+                            stage=job.stage,
+                        )
+                    except Exception as exc:
+                        logger.warning("Failed to record cancellation in DB: %s", exc)
                 self._lock.notify_all()
                 return True
             job.cancel_requested.set()
@@ -382,6 +450,18 @@ class JobManager:
                 job.error = f"failed to start runner: {type(exc).__name__}: {exc}"
                 job.finished_at = time.time()
                 self._running_count -= 1
+                if self._db is not None:
+                    try:
+                        self._db.record_job_completed(
+                            job.job_id,
+                            status=job.state.value,
+                            completed_at=job.finished_at,
+                            error=job.error,
+                            failure_kind=job.failure_kind,
+                            stage=job.stage,
+                        )
+                    except Exception as db_exc:
+                        logger.warning("Failed to record job spawn error in DB: %s", db_exc)
                 continue
 
             job.process = process
@@ -389,6 +469,16 @@ class JobManager:
             job.deadline = self._monotonic() + self._settings.timeout_seconds
             job.state = JobState.RUNNING
             job.stage = "running"
+            if self._db is not None:
+                try:
+                    self._db.record_job_started(
+                        job.job_id,
+                        status=job.state.value,
+                        started_at=job.started_at,
+                        stage=job.stage,
+                    )
+                except Exception as exc:
+                    logger.warning("Failed to record job start in DB: %s", exc)
 
             watcher = threading.Thread(
                 target=self._watch,
@@ -577,6 +667,31 @@ class JobManager:
                 )
             else:
                 self._classify_exit(job, supervision_error)
+
+            artifact_path = None
+            if job.run_id:
+                report_path = self._artifacts_dir / _REPORT_FILE_TEMPLATE.format(
+                    run_id=job.run_id
+                )
+                if report_path.is_file():
+                    artifact_path = str(report_path)
+
+            if self._db is not None:
+                try:
+                    self._db.record_job_completed(
+                        job.job_id,
+                        status=job.state.value,
+                        completed_at=job.finished_at,
+                        exit_code=job.exit_code,
+                        error=job.error,
+                        failure_kind=job.failure_kind,
+                        stage=job.stage,
+                        run_id=job.run_id,
+                        artifact_path=artifact_path,
+                    )
+                except Exception as exc:
+                    logger.warning("Failed to record job completion in DB: %s", exc)
+
             self._running_count = max(0, self._running_count - 1)
             self._lock.notify_all()
             self._dispatch_locked()

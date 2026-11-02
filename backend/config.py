@@ -16,6 +16,11 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+# Load .env before configuration resolution
+load_dotenv()
+
 from backend.engine_runner import resolve_artifacts_dir, resolve_repo_root
 
 DEFAULT_FRONTEND_ORIGINS: tuple[str, ...] = (
@@ -23,17 +28,22 @@ DEFAULT_FRONTEND_ORIGINS: tuple[str, ...] = (
     "http://127.0.0.1:3000",
 )
 
+DEFAULT_BACKEND_PORT: int = 8001
+DEFAULT_DATABASE_URL: str = "postgresql://postgres@127.0.0.1:5432/multi_agent_research"
+
 REQUIRED_ENGINE_ENV: tuple[str, ...] = ("MESH_API_KEY", "EXA_API_KEY")
 OPTIONAL_ENGINE_ENV: tuple[str, ...] = ("TAVILY_API_KEY",)
 
 
 @dataclass(frozen=True)
 class BackendConfig:
-    """Resolved backend configuration (paths and origins only, never secrets)."""
+    """Resolved backend configuration (paths, ports, db, and origins only, never secrets)."""
 
     repo_root: Path
     artifacts_dir: Path
     frontend_origins: tuple[str, ...]
+    port: int = DEFAULT_BACKEND_PORT
+    database_url: str = DEFAULT_DATABASE_URL
 
 
 def _parse_frontend_origins(raw: str | None) -> tuple[str, ...]:
@@ -44,13 +54,39 @@ def _parse_frontend_origins(raw: str | None) -> tuple[str, ...]:
     return DEFAULT_FRONTEND_ORIGINS
 
 
-def load_config() -> BackendConfig:
+def resolve_backend_port(env: Mapping[str, str] | None = None) -> int:
+    """Resolve backend listening port. Honors BACKEND_PORT, then PORT, defaulting to 8001."""
+    source = os.environ if env is None else env
+    for key in ("BACKEND_PORT", "PORT"):
+        raw = source.get(key)
+        if raw is not None and str(raw).strip():
+            return _env_int(source, key, DEFAULT_BACKEND_PORT)
+    return DEFAULT_BACKEND_PORT
+
+
+def resolve_database_url(env: Mapping[str, str] | None = None) -> Optional[str]:
+    """Resolve primary PostgreSQL connection string."""
+    source = os.environ if env is None else env
+    url = source.get("DATABASE_URL")
+    if url is not None:
+        trimmed = str(url).strip()
+        return trimmed if trimmed else None
+    env_mode = (source.get("ENV") or source.get("ENVIRONMENT") or "").lower()
+    if env_mode == "production":
+        raise ValueError("DATABASE_URL must be explicitly configured in production")
+    return DEFAULT_DATABASE_URL
+
+
+def load_config(env: Mapping[str, str] | None = None) -> BackendConfig:
     """Resolve configuration from the current environment."""
+    source = os.environ if env is None else env
     repo_root = resolve_repo_root()
     return BackendConfig(
         repo_root=repo_root,
         artifacts_dir=resolve_artifacts_dir(repo_root),
-        frontend_origins=_parse_frontend_origins(os.getenv("FRONTEND_ORIGIN")),
+        frontend_origins=_parse_frontend_origins(source.get("FRONTEND_ORIGIN")),
+        port=resolve_backend_port(source),
+        database_url=resolve_database_url(source),
     )
 
 
