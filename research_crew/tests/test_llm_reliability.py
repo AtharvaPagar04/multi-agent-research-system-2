@@ -132,3 +132,11 @@ def test_telemetry_and_tracing_opt_out_guarantees():
     assert CoreTelemetry._is_telemetry_disabled() is True
     assert _tracing_disabled(None) is True
     assert _tracing_disabled(False) is True
+
+
+def test_build_llm_raises_when_mesh_key_missing():
+    """_build_llm raises RuntimeError when MESH_API_KEY is not configured."""
+    with patch.dict("os.environ", {"MESH_API_KEY": ""}):
+        with pytest.raises(RuntimeError, match="MESH_API_KEY is required"):
+            _build_llm()
+

@@ -25,6 +25,10 @@ import {
   cancelRun,
   createRun,
   describeApiError,
+  fetchRunAudit,
+  fetchRunClaims,
+  fetchRunEvidence,
+  fetchRunFeedback,
   fetchRunReport,
   getRun,
   isActiveState,
@@ -122,8 +126,13 @@ test("validateTopic enforces trimmed non-empty topics up to the backend cap", ()
 
 test("apiBaseUrl uses the localhost default and trims env overrides", () => {
   delete process.env.NEXT_PUBLIC_API_BASE_URL;
+  delete process.env.BACKEND_URL;
   assert.equal(apiBaseUrl(), DEFAULT_API_BASE_URL);
-  assert.equal(DEFAULT_API_BASE_URL, "http://127.0.0.1:8000");
+  assert.equal(DEFAULT_API_BASE_URL, "http://127.0.0.1:8001");
+
+  process.env.BACKEND_URL = "http://127.0.0.1:8005/";
+  assert.equal(apiBaseUrl(), "http://127.0.0.1:8005");
+  delete process.env.BACKEND_URL;
 
   process.env.NEXT_PUBLIC_API_BASE_URL = "  http://127.0.0.1:9001///  ";
   assert.equal(apiBaseUrl(), "http://127.0.0.1:9001");
@@ -433,4 +442,89 @@ test("cancelOutcomeMessage states best-effort semantics without overclaiming", (
   const declined = cancelOutcomeMessage(false, completed);
   assert.match(declined, /did not accept/);
   assert.match(declined, /completed/);
+});
+
+test("fetchRunClaims requests /api/runs/{id}/claims and parses json", async () => {
+  const claimsPayload = {
+    total_claims: 2,
+    supported_claims_count: 1,
+    records: [{ claim_id: "c1", claim_text: "Claim 1", verdict: "supported" }],
+    warnings: ["warning 1"],
+  };
+  const { calls, fake } = captureFetch(() => jsonResponse(claimsPayload));
+
+  await withFetch(fake, async () => {
+    const claims = await fetchRunClaims(RUN_ID);
+    assert.equal(calls[0].url, `${DEFAULT_API_BASE_URL}/api/runs/${RUN_ID}/claims`);
+    assert.equal(claims.total_claims, 2);
+    assert.equal(claims.records.length, 1);
+  });
+});
+
+test("fetchRunEvidence requests /api/runs/{id}/evidence and handles 404", async () => {
+  let status = 200;
+  const evidencePayload = {
+    version: 1,
+    run_id: RUN_ID,
+    record_count: 1,
+    records: [{ evidence_id: "e1", source_url: "https://example.com" }],
+  };
+  const { calls, fake } = captureFetch(() =>
+    status === 200
+      ? jsonResponse(evidencePayload)
+      : jsonResponse({ detail: "Evidence not found" }, 404),
+  );
+
+  await withFetch(fake, async () => {
+    const evidence = await fetchRunEvidence(RUN_ID);
+    assert.equal(calls[0].url, `${DEFAULT_API_BASE_URL}/api/runs/${RUN_ID}/evidence`);
+    assert.equal(evidence.record_count, 1);
+
+    status = 404;
+    await assert.rejects(fetchRunEvidence(RUN_ID), (error) => {
+      assert.ok(error instanceof ApiError);
+      assert.equal(error.status, 404);
+      assert.equal(error.detail, "Evidence not found");
+      return true;
+    });
+  });
+});
+
+test("fetchRunFeedback requests /api/runs/{id}/feedback and parses payload", async () => {
+  const feedbackPayload = {
+    run_id: RUN_ID,
+    total_rounds_executed: 2,
+    iterations: [{ iteration_index: 0, queries_issued: [] }],
+  };
+  const { calls, fake } = captureFetch(() => jsonResponse(feedbackPayload));
+
+  await withFetch(fake, async () => {
+    const feedback = await fetchRunFeedback(RUN_ID);
+    assert.equal(calls[0].url, `${DEFAULT_API_BASE_URL}/api/runs/${RUN_ID}/feedback`);
+    assert.equal(feedback.total_rounds_executed, 2);
+  });
+});
+
+test("fetchRunAudit requests /api/runs/{id}/audit and normalizes response", async () => {
+  const auditPayload = {
+    run_id: RUN_ID,
+    report_available: true,
+    audit_lines: [{ label: "Source", detail: "[1]", raw: "Source: [1]" }],
+    citation_audit: { matched: 5, total: 5, detail: "all verified" },
+    claim_audit: { supported: 3, total: 4, detail: "3/4 supported" },
+    metric_audit: { traceable: 2, total: 2, detail: "all traceable" },
+    warnings: ["warning a"],
+  };
+  const { calls, fake } = captureFetch(() => jsonResponse(auditPayload));
+
+  await withFetch(fake, async () => {
+    const audit = await fetchRunAudit(RUN_ID);
+    assert.equal(calls[0].url, `${DEFAULT_API_BASE_URL}/api/runs/${RUN_ID}/audit`);
+    assert.equal(audit.run_id, RUN_ID);
+    assert.equal(audit.report_available, true);
+    assert.equal(audit.audit_lines.length, 1);
+    assert.equal(audit.citation_audit.matched, 5);
+    assert.equal(audit.claim_audit.supported, 3);
+    assert.equal(audit.warnings[0], "warning a");
+  });
 });

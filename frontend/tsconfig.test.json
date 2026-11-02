@@ -11,5 +11,11 @@
     "outDir": ".test-build",
     "rootDir": "src/lib"
   },
-  "include": ["src/lib/api.ts"]
+  "include": [
+    "src/lib/api.ts",
+    "src/lib/fs-paths.ts",
+    "src/lib/report-parser.ts",
+    "src/lib/types.ts",
+    "src/lib/runs.ts"
+  ]
 }
