@@ -132,6 +132,7 @@ def _setup(monkeypatch, tmp_path: Path) -> tuple[Path, Path]:
     monkeypatch.setenv("JOB_TIMEOUT_SECONDS", "30")
     monkeypatch.setenv("JOB_KILL_GRACE_SECONDS", "2")
     monkeypatch.delenv("ENGINE_PYTHON", raising=False)
+    monkeypatch.setenv("DATABASE_URL", "")
     return repo, artifacts
 
 

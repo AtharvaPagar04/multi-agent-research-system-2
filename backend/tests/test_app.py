@@ -205,3 +205,4 @@ def test_importing_app_does_not_import_research_engine():
 
     assert result.returncode == 0, result.stderr
     assert "import-isolation-ok" in result.stdout
+
