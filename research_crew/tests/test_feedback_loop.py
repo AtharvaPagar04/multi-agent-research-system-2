@@ -1680,9 +1680,27 @@ def test_task14_resolution_audit_serialization_backward_compatible():
     assert unmatched.to_dict()["recheck_claim_id"] is None
     assert unmatched.to_dict()["verdict_after_recheck"] is None
 
-    historical = json.loads(
-        (Path("evidence_runs") / "feedback_loop_de3572bb68b442fd92e4ca8086cbea18.json").read_text()
-    )
-    old_shape_keys = set(historical["iterations"][0]["targeted_claim_resolutions"][0].keys()) if historical["iterations"][0].get("targeted_claim_resolutions") else set(dumped.keys()) - {"recheck_claim_id"}
-    assert old_shape_keys == set(dumped.keys()) - {"recheck_claim_id"}
+    # Self-contained fixture: legacy ClaimResolutionAudit schema (prior to Task 14)
+    # contained exactly these 7 keys without recheck_claim_id.
+    historical_shape_keys = {
+        "claim_id",
+        "claim_text",
+        "gained_relevant_evidence",
+        "evidence_id",
+        "source_url",
+        "verdict_after_recheck",
+        "notes",
+    }
+    assert historical_shape_keys == set(dumped.keys()) - {"recheck_claim_id"}
+
+    # Also verify backward-compatibility with disk artifacts when present (optional in fresh clones)
+    historical_path = Path("evidence_runs") / "feedback_loop_de3572bb68b442fd92e4ca8086cbea18.json"
+    if historical_path.exists():
+        historical = json.loads(historical_path.read_text())
+        old_shape_keys = (
+            set(historical["iterations"][0]["targeted_claim_resolutions"][0].keys())
+            if historical["iterations"][0].get("targeted_claim_resolutions")
+            else set(dumped.keys()) - {"recheck_claim_id"}
+        )
+        assert old_shape_keys == set(dumped.keys()) - {"recheck_claim_id"}
 
