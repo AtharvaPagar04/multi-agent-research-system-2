@@ -4,3 +4,4 @@ node_modules/
 out/
 .test-build/
 .env*.local
+*.tsbuildinfo
