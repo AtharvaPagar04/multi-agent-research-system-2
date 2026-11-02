@@ -1,14 +1,16 @@
-import fs from "node:fs";
-import path from "node:path";
 import { cache } from "react";
 
 import {
-  artifactsDir,
-  findReportFilesForRun,
-  listRunIdsFromArtifacts,
-  safeReadJson,
-  shortRunId,
-} from "./fs-paths";
+  ApiError,
+  fetchRunAudit,
+  fetchRunClaims,
+  fetchRunEvidence,
+  fetchRunFeedback,
+  fetchRunReport,
+  listRuns,
+  type ApiRunListResponse,
+} from "./api";
+import { shortRunId } from "./fs-paths";
 import { normalizeClaim, parseReportMarkdown } from "./report-parser";
 import type {
   EvidenceRecord,
@@ -28,12 +30,6 @@ function toCount(value: unknown): number | null {
 
 function toTrimmedString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
-}
-
-function runIdMatches(raw: Record<string, unknown>, runId: string): boolean {
-  const internal = raw.run_id;
-  if (typeof internal !== "string" || !internal.trim()) return true;
-  return internal.trim().toLowerCase() === runId.toLowerCase();
 }
 
 function normalizeEvidence(
@@ -92,74 +88,106 @@ function resolveTopic(
   claims: { claim_text: string }[],
 ): string | null {
   if (reportTitle) return reportTitle;
-  // No report on disk: expose a compact claim-context label for navigation only.
+  // No report on backend: expose a compact claim-context label for navigation only.
   const first = claims.find((claim) => claim.claim_text?.trim());
   if (!first) return null;
   const text = first.claim_text.trim().replace(/\s+/g, " ");
   return text.length > 96 ? `${text.slice(0, 93)}…` : text;
 }
 
-function loadRunInternal(runId: string): ResearchRunDetail | null {
-  const dir = artifactsDir();
-  const evidencePath = path.join(dir, `evidence_${runId}.json`);
-  const claimsPath = path.join(dir, `claim_verifications_${runId}.json`);
-  const feedbackPath = path.join(dir, `feedback_loop_${runId}.json`);
+async function loadRunInternal(
+  runId: string,
+): Promise<ResearchRunDetail | null> {
+  const cleanRunId = runId.trim().toLowerCase();
+  if (!cleanRunId) return null;
 
-  // Validate artifact shape before use; malformed or mismatched files are
-  // treated as unavailable rather than partially trusted.
-  const evidenceRaw = safeReadJson<unknown>(evidencePath);
-  const evidenceArtifact =
-    isPlainObject(evidenceRaw) &&
-    Array.isArray(evidenceRaw.records) &&
-    runIdMatches(evidenceRaw, runId)
-      ? evidenceRaw
-      : null;
+  // Request all artifacts concurrently via the backend API
+  const [claimsResult, evidenceResult, feedbackResult, reportResult, auditResult] =
+    await Promise.allSettled([
+      fetchRunClaims(cleanRunId),
+      fetchRunEvidence(cleanRunId),
+      fetchRunFeedback(cleanRunId),
+      fetchRunReport(cleanRunId),
+      fetchRunAudit(cleanRunId),
+    ]);
 
-  const claimsRaw = safeReadJson<unknown>(claimsPath);
-  const claimsArtifact =
-    isPlainObject(claimsRaw) && Array.isArray(claimsRaw.records)
-      ? claimsRaw
-      : null;
+  const claimsRaw =
+    claimsResult.status === "fulfilled" ? claimsResult.value : null;
+  const evidenceRaw =
+    evidenceResult.status === "fulfilled" ? evidenceResult.value : null;
+  const feedbackRaw =
+    feedbackResult.status === "fulfilled" ? feedbackResult.value : null;
+  const reportMarkdown =
+    reportResult.status === "fulfilled" ? reportResult.value : null;
+  const auditPayload =
+    auditResult.status === "fulfilled" ? auditResult.value : null;
 
-  const feedbackRaw = safeReadJson<unknown>(feedbackPath);
-  const feedbackArtifact =
-    isPlainObject(feedbackRaw) &&
-    Array.isArray(feedbackRaw.iterations) &&
-    runIdMatches(feedbackRaw, runId)
-      ? feedbackRaw
-      : null;
+  const hasClaims =
+    isPlainObject(claimsRaw) && Array.isArray(claimsRaw.records);
+  const hasEvidence =
+    isPlainObject(evidenceRaw) && Array.isArray(evidenceRaw.records);
+  const hasFeedback =
+    isPlainObject(feedbackRaw) && Array.isArray(feedbackRaw.iterations);
+  const hasReport =
+    typeof reportMarkdown === "string" && reportMarkdown.trim().length > 0;
+  const hasAudit = auditPayload !== null;
 
-  const hasEvidence = evidenceArtifact !== null;
-  const hasClaims = claimsArtifact !== null;
-  const hasFeedback = feedbackArtifact !== null;
-
-  if (!hasEvidence && !hasClaims && !hasFeedback) return null;
+  // If no artifacts exist at all, check if backend failed with network/503
+  if (!hasClaims && !hasEvidence && !hasFeedback && !hasReport && !hasAudit) {
+    if (
+      claimsResult.status === "rejected" &&
+      claimsResult.reason instanceof ApiError &&
+      (claimsResult.reason.kind === "network" || claimsResult.reason.status === 503)
+    ) {
+      throw claimsResult.reason;
+    }
+    return null;
+  }
 
   const evidenceRecords: EvidenceRecord[] = hasEvidence
-    ? (evidenceArtifact.records as unknown[])
+    ? (evidenceRaw.records as unknown[])
         .filter(isPlainObject)
         .map(normalizeEvidence)
     : [];
 
   const claims = hasClaims
-    ? (claimsArtifact.records as unknown[])
+    ? (claimsRaw.records as unknown[])
         .filter(isPlainObject)
         .map(normalizeClaim)
     : [];
 
-  const reportPaths = findReportFilesForRun(runId);
-  let report = null;
-  for (const reportPath of reportPaths) {
-    try {
-      const markdown = fs.readFileSync(reportPath, "utf8");
-      const parsed = parseReportMarkdown(markdown, path.relative(path.dirname(dir), reportPath));
-      // Prefer title-bearing research reports over short audit notes.
-      if (!report || (parsed.title && !report.title)) {
-        report = parsed;
+  const claimWarnings: string[] = [];
+  if (hasClaims && Array.isArray(claimsRaw.warnings)) {
+    for (const w of claimsRaw.warnings) {
+      if (typeof w === "string" && !claimWarnings.includes(w)) {
+        claimWarnings.push(w);
       }
-    } catch {
-      // skip unreadable report files
     }
+  }
+  if (auditPayload && Array.isArray(auditPayload.warnings)) {
+    for (const w of auditPayload.warnings) {
+      if (typeof w === "string" && !claimWarnings.includes(w)) {
+        claimWarnings.push(w);
+      }
+    }
+  }
+
+  let report = null;
+  if (hasReport) {
+    report = parseReportMarkdown(
+      reportMarkdown,
+      `research_report_${cleanRunId}.md`,
+    );
+  }
+
+  // Fallback to audit lines from backend audit endpoint if report didn't have them
+  if (
+    report &&
+    report.auditLines.length === 0 &&
+    auditPayload &&
+    auditPayload.audit_lines.length > 0
+  ) {
+    report.auditLines = auditPayload.audit_lines;
   }
 
   const fullTextCount = evidenceRecords.filter(
@@ -172,8 +200,6 @@ function loadRunInternal(runId: string): ResearchRunDetail | null {
     (record) => record.retrieval_status === "failed",
   ).length;
 
-  // Trust artifact counts only when they are numeric and agree with the
-  // sanitized records actually rendered; otherwise compute from records.
   const computedSupported = claims.filter(
     (claim) => claim.verdict === "supported",
   ).length;
@@ -184,8 +210,12 @@ function loadRunInternal(runId: string): ResearchRunDetail | null {
     (claim) => claim.verdict === "insufficient_evidence",
   ).length;
 
-  const totalClaims = hasClaims ? claims.length : null;
-  const supportedClaims = hasClaims ? computedSupported : null;
+  const totalClaims = hasClaims
+    ? claims.length
+    : (auditPayload?.claim_audit?.total ?? null);
+  const supportedClaims = hasClaims
+    ? computedSupported
+    : (auditPayload?.claim_audit?.supported ?? null);
   const contradictedClaims = hasClaims ? computedContradicted : null;
   const insufficientClaims = hasClaims ? computedInsufficient : null;
 
@@ -195,33 +225,33 @@ function loadRunInternal(runId: string): ResearchRunDetail | null {
       : null;
 
   const createdAt = hasEvidence
-    ? toTrimmedString(evidenceArtifact.created_at)
+    ? toTrimmedString(evidenceRaw.created_at)
     : null;
 
   const topic = resolveTopic(report?.title ?? null, claims);
 
   const feedback: FeedbackArtifact | null = hasFeedback
     ? {
-        run_id: runId,
-        max_rounds: toCount(feedbackArtifact.max_rounds),
-        total_rounds_executed: toCount(feedbackArtifact.total_rounds_executed),
-        terminated_reason: toTrimmedString(feedbackArtifact.terminated_reason),
+        run_id: cleanRunId,
+        max_rounds: toCount(feedbackRaw.max_rounds),
+        total_rounds_executed: toCount(feedbackRaw.total_rounds_executed),
+        terminated_reason: toTrimmedString(feedbackRaw.terminated_reason),
         final_claims_supported_count: toCount(
-          feedbackArtifact.final_claims_supported_count,
+          feedbackRaw.final_claims_supported_count,
         ),
         final_unresolved_claims_count: toCount(
-          feedbackArtifact.final_unresolved_claims_count,
+          feedbackRaw.final_unresolved_claims_count,
         ),
-        final_action_policy: toTrimmedString(feedbackArtifact.final_action_policy),
-        iterations: (feedbackArtifact.iterations as unknown[]).filter(
-          isPlainObject,
-        ).map(normalizeIteration),
+        final_action_policy: toTrimmedString(feedbackRaw.final_action_policy),
+        iterations: (feedbackRaw.iterations as unknown[])
+          .filter(isPlainObject)
+          .map(normalizeIteration),
       }
     : null;
 
   return {
-    runId,
-    shortId: shortRunId(runId),
+    runId: cleanRunId,
+    shortId: shortRunId(cleanRunId),
     topic,
     createdAt,
     hasEvidence,
@@ -240,26 +270,77 @@ function loadRunInternal(runId: string): ResearchRunDetail | null {
     feedbackRounds: feedback ? feedback.total_rounds_executed : null,
     terminatedReason: feedback ? feedback.terminated_reason : null,
     claims,
-    claimWarnings:
-      hasClaims && Array.isArray(claimsArtifact.warnings)
-        ? claimsArtifact.warnings.filter(
-            (warning): warning is string => typeof warning === "string",
-          )
-        : [],
+    claimWarnings,
     evidence: evidenceRecords,
     feedback,
     report,
+    audit: auditPayload,
   };
 }
 
-export const listResearchRuns = cache((): RunSummary[] => {
-  const runIds = listRunIdsFromArtifacts();
+const detailCache = new Map<
+  string,
+  { data: ResearchRunDetail | null; expiry: number }
+>();
+let listCache: { data: RunSummary[]; expiry: number } | null = null;
+const CACHE_TTL_MS = 30_000;
+
+export const getResearchRun = cache(
+  async (runId: string): Promise<ResearchRunDetail | null> => {
+    const normalized = runId.trim().toLowerCase();
+    if (!normalized) return null;
+    const now = Date.now();
+    const cached = detailCache.get(normalized);
+    if (cached && cached.expiry > now) {
+      return cached.data;
+    }
+    const detail = await loadRunInternal(normalized);
+    detailCache.set(normalized, { data: detail, expiry: now + CACHE_TTL_MS });
+    return detail;
+  },
+);
+
+export const listResearchRuns = cache(async (): Promise<RunSummary[]> => {
+  const now = Date.now();
+  if (listCache && listCache.expiry > now) {
+    return listCache.data;
+  }
+
+  let runList: ApiRunListResponse;
+  try {
+    runList = await listRuns();
+  } catch (error) {
+    if (
+      error instanceof ApiError &&
+      (error.kind === "network" || error.status === 503)
+    ) {
+      return [];
+    }
+    throw error;
+  }
+
+  const runIds = new Set<string>();
+  for (const item of runList.historical_runs) {
+    if (item.run_id) runIds.add(item.run_id.toLowerCase());
+  }
+  for (const job of runList.jobs) {
+    if (job.run_id) runIds.add(job.run_id.toLowerCase());
+  }
+
+  const detailPromises = Array.from(runIds).map(async (runId) => {
+    try {
+      return await getResearchRun(runId);
+    } catch {
+      return null;
+    }
+  });
+
+  const details = await Promise.all(detailPromises);
   const summaries: RunSummary[] = [];
 
-  for (const runId of runIds) {
-    const detail = loadRunInternal(runId);
+  for (const detail of details) {
     if (!detail) continue;
-    const summary: RunSummary = {
+    summaries.push({
       runId: detail.runId,
       shortId: detail.shortId,
       topic: detail.topic,
@@ -279,25 +360,25 @@ export const listResearchRuns = cache((): RunSummary[] => {
       supportRate: detail.supportRate,
       feedbackRounds: detail.feedbackRounds,
       terminatedReason: detail.terminatedReason,
-    };
-    summaries.push(summary);
+    });
   }
 
   summaries.sort((a, b) => {
-    const aTime = a.createdAt ? Date.parse(a.createdAt) : Number.NEGATIVE_INFINITY;
-    const bTime = b.createdAt ? Date.parse(b.createdAt) : Number.NEGATIVE_INFINITY;
+    const aTime = a.createdAt
+      ? Date.parse(a.createdAt)
+      : Number.NEGATIVE_INFINITY;
+    const bTime = b.createdAt
+      ? Date.parse(b.createdAt)
+      : Number.NEGATIVE_INFINITY;
     if (aTime !== bTime) return bTime - aTime;
     return a.runId.localeCompare(b.runId);
   });
 
+  listCache = { data: summaries, expiry: now + CACHE_TTL_MS };
   return summaries;
 });
 
-export const getResearchRun = cache(
-  (runId: string): ResearchRunDetail | null => loadRunInternal(runId),
-);
-
-export const getLatestRunId = cache((): string | null => {
-  const runs = listResearchRuns();
+export const getLatestRunId = cache(async (): Promise<string | null> => {
+  const runs = await listResearchRuns();
   return runs[0]?.runId ?? null;
 });

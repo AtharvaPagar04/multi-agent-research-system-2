@@ -1,3 +1,5 @@
+import type { ApiAuditPayload } from "./api";
+
 export type ClaimVerdict = "supported" | "contradicted" | "insufficient_evidence";
 
 export type RetrievalStatus = "full_text" | "snippet_only" | "failed" | null;
@@ -127,4 +129,5 @@ export interface ResearchRunDetail extends RunSummary {
   evidence: EvidenceRecord[];
   feedback: FeedbackArtifact | null;
   report: ResearchReportArtifact | null;
+  audit?: ApiAuditPayload | null;
 }

@@ -18,16 +18,16 @@ export default async function RunLayout({
   params: Promise<{ runId: string }>;
 }) {
   const { runId } = await params;
-  const run = getResearchRun(runId.toLowerCase());
+  const run = await getResearchRun(runId.toLowerCase());
   if (!run) notFound();
 
-  const runs = listResearchRuns();
+  const runs = await listResearchRuns();
   const availability: Record<RunTabKey, boolean> = {
     overview: true,
     report: run.hasReport,
     claims: run.hasClaims,
     evidence: run.hasEvidence,
-    audit: run.hasClaims || run.hasReport,
+    audit: run.hasClaims || run.hasReport || Boolean(run.audit),
     feedback: run.hasFeedback,
   };
 
@@ -65,9 +65,9 @@ export default async function RunLayout({
             </div>
           </div>
           <p className="mt-3 font-mono text-[11px] leading-5 text-zinc-600">
-            Artifact-only view — this page reads local evidence_runs files and
-            never executes research. Live job status and cancellation stay in
-            the runs console.
+            Historical run view — backed by research API endpoints (/claims,
+            /evidence, /feedback, /report, /audit). Live job status and
+            cancellation stay in the runs console.
           </p>
         </div>
         <RunTabs runId={run.runId} availability={availability} />

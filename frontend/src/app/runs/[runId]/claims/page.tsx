@@ -11,7 +11,7 @@ export default async function ClaimsPage({
   params: Promise<{ runId: string }>;
 }) {
   const { runId } = await params;
-  const run = getResearchRun(runId.toLowerCase());
+  const run = await getResearchRun(runId.toLowerCase());
   if (!run) notFound();
 
   return (

@@ -11,7 +11,7 @@ export default async function RunIndexPage({
 }) {
   const { runId } = await params;
   const normalized = runId.toLowerCase();
-  const run = getResearchRun(normalized);
+  const run = await getResearchRun(normalized);
   if (!run) notFound();
 
   redirect(`/runs/${run.runId}/report`);

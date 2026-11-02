@@ -5,10 +5,27 @@ import type { ResearchRunDetail } from "@/lib/types";
 export function QualityFindings({ run }: { run: ResearchRunDetail }) {
   const report = run.report;
 
-  const metricTraceable = report?.metricAudit.traceable ?? null;
-  const metricTotal = report?.metricAudit.total ?? null;
-  const claimSupported = report?.claimAudit.supported ?? run.supportedClaims;
-  const claimTotal = report?.claimAudit.total ?? run.totalClaims;
+  const metricTraceable =
+    report?.metricAudit.traceable ?? run.audit?.metric_audit?.traceable ?? null;
+  const metricTotal =
+    report?.metricAudit.total ?? run.audit?.metric_audit?.total ?? null;
+  const metricDetail =
+    report?.metricAudit.detail ||
+    run.audit?.metric_audit?.detail ||
+    "No metrics audit line in report footer";
+
+  const claimSupported =
+    report?.claimAudit.supported ??
+    run.audit?.claim_audit?.supported ??
+    run.supportedClaims;
+  const claimTotal =
+    report?.claimAudit.total ??
+    run.audit?.claim_audit?.total ??
+    run.totalClaims;
+
+  const auditLines =
+    (report?.auditLines?.length ? report.auditLines : run.audit?.audit_lines) ??
+    [];
 
   return (
     <div className="space-y-4">
@@ -39,7 +56,7 @@ export function QualityFindings({ run }: { run: ResearchRunDetail }) {
                   ? `${metricTraceable}/${metricTotal}`
                   : UNAVAILABLE
               }
-              hint={report?.metricAudit.detail || "No metrics audit line in report footer"}
+              hint={metricDetail}
             />
             <StatCard
               label="Full-text sources"
@@ -52,13 +69,13 @@ export function QualityFindings({ run }: { run: ResearchRunDetail }) {
             />
           </div>
 
-          {report?.auditLines?.length ? (
+          {auditLines.length > 0 ? (
             <div className="rounded-md border border-zinc-900 bg-black/20">
               <div className="border-b border-zinc-900 px-4 py-2 font-mono text-[11px] uppercase tracking-[0.14em] text-zinc-500">
                 Report audit footer
               </div>
               <ul className="divide-y divide-zinc-900/80">
-                {report.auditLines.map((line, index) => (
+                {auditLines.map((line, index) => (
                   <li key={index} className="px-4 py-2.5">
                     <span className="font-mono text-[11px] uppercase tracking-[0.12em] text-zinc-500">
                       {line.label}

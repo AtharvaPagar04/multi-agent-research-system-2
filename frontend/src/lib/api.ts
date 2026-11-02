@@ -3,7 +3,7 @@
  *
  * The base URL comes from NEXT_PUBLIC_API_BASE_URL (inlined by Next.js at
  * build time) and defaults to the local development backend at
- * http://127.0.0.1:8000. Every failure mode (network unreachable, timeout,
+ * http://127.0.0.1:8001. Every failure mode (network unreachable, timeout,
  * HTTP error, unreadable payload) is normalized into an ApiError so the UI
  * never crashes on a missing or misbehaving backend.
  *
@@ -12,9 +12,37 @@
  * (see tsconfig.test.json and tests/api.test.mjs).
  */
 
-export const DEFAULT_API_BASE_URL = "http://127.0.0.1:8000";
+export const DEFAULT_API_BASE_URL = "http://127.0.0.1:8001";
 export const MAX_TOPIC_LENGTH = 500;
 export const REQUEST_TIMEOUT_MS = 10_000;
+
+export interface ApiAuditLine {
+  label: string;
+  detail: string;
+  raw: string;
+}
+
+export interface ApiAuditPayload {
+  run_id: string;
+  report_available: boolean;
+  audit_lines: ApiAuditLine[];
+  citation_audit: {
+    matched: number | null;
+    total: number | null;
+    detail: string | null;
+  } | null;
+  claim_audit: {
+    supported: number | null;
+    total: number | null;
+    detail: string | null;
+  } | null;
+  metric_audit: {
+    traceable: number | null;
+    total: number | null;
+    detail: string | null;
+  } | null;
+  warnings: string[];
+}
 
 export type ApiOrigin = "manager" | "artifact";
 
@@ -165,8 +193,11 @@ export function validateTopic(raw: string): TopicValidation {
 }
 
 export function apiBaseUrl(): string {
-  const raw = process.env.NEXT_PUBLIC_API_BASE_URL;
-  const trimmed = typeof raw === "string" ? raw.trim() : "";
+  const envVal =
+    (typeof process !== "undefined" &&
+      (process.env.BACKEND_URL || process.env.NEXT_PUBLIC_API_BASE_URL)) ||
+    "";
+  const trimmed = typeof envVal === "string" ? envVal.trim() : "";
   if (!trimmed) return DEFAULT_API_BASE_URL;
   return trimmed.replace(/\/+$/, "");
 }
@@ -177,7 +208,7 @@ export function describeApiError(error: unknown): string {
       return "The backend did not respond in time. Check that it is running and try again.";
     }
     if (error.kind === "network") {
-      return `Could not reach the research backend at ${apiBaseUrl()}. Start it with: .venv313/bin/python -m uvicorn backend.app:app --host 127.0.0.1 --port 8000`;
+      return `Could not reach the research backend at ${apiBaseUrl()}. Start it with: .venv313/bin/python -m uvicorn backend.app:app --host 127.0.0.1 --port 8001`;
     }
     if (error.status === 429) {
       return `Backend queue is full: ${error.detail}`;
@@ -408,4 +439,113 @@ export async function fetchRunReport(jobId: string): Promise<string> {
     "text",
   );
   return typeof payload === "string" ? payload : "";
+}
+
+export async function fetchRunClaims(
+  jobId: string,
+): Promise<Record<string, unknown>> {
+  const payload = await request(
+    {
+      method: "GET",
+      path: `/api/runs/${encodeURIComponent(jobId)}/claims`,
+      accept: "application/json",
+    },
+    "json",
+  );
+  return asRecord(payload);
+}
+
+export async function fetchRunEvidence(
+  jobId: string,
+): Promise<Record<string, unknown>> {
+  const payload = await request(
+    {
+      method: "GET",
+      path: `/api/runs/${encodeURIComponent(jobId)}/evidence`,
+      accept: "application/json",
+    },
+    "json",
+  );
+  return asRecord(payload);
+}
+
+export async function fetchRunFeedback(
+  jobId: string,
+): Promise<Record<string, unknown>> {
+  const payload = await request(
+    {
+      method: "GET",
+      path: `/api/runs/${encodeURIComponent(jobId)}/feedback`,
+      accept: "application/json",
+    },
+    "json",
+  );
+  return asRecord(payload);
+}
+
+export async function fetchRunAudit(jobId: string): Promise<ApiAuditPayload> {
+  const payload = await request(
+    {
+      method: "GET",
+      path: `/api/runs/${encodeURIComponent(jobId)}/audit`,
+      accept: "application/json",
+    },
+    "json",
+  );
+  const record = asRecord(payload);
+  const auditLinesRaw = Array.isArray(record.audit_lines)
+    ? record.audit_lines
+    : [];
+  const auditLines: ApiAuditLine[] = auditLinesRaw.map((item) => {
+    const rec = asRecord(item);
+    return {
+      label: asStringOrNull(rec.label) ?? "",
+      detail: asStringOrNull(rec.detail) ?? "",
+      raw: asStringOrNull(rec.raw) ?? "",
+    };
+  });
+
+  const citationRaw = asRecord(record.citation_audit);
+  const citationAudit =
+    Object.keys(citationRaw).length > 0
+      ? {
+          matched: asNumberOrNull(citationRaw.matched),
+          total: asNumberOrNull(citationRaw.total),
+          detail: asStringOrNull(citationRaw.detail),
+        }
+      : null;
+
+  const claimRaw = asRecord(record.claim_audit);
+  const claimAudit =
+    Object.keys(claimRaw).length > 0
+      ? {
+          supported: asNumberOrNull(claimRaw.supported),
+          total: asNumberOrNull(claimRaw.total),
+          detail: asStringOrNull(claimRaw.detail),
+        }
+      : null;
+
+  const metricRaw = asRecord(record.metric_audit);
+  const metricAudit =
+    Object.keys(metricRaw).length > 0
+      ? {
+          traceable: asNumberOrNull(metricRaw.traceable),
+          total: asNumberOrNull(metricRaw.total),
+          detail: asStringOrNull(metricRaw.detail),
+        }
+      : null;
+
+  const warnings = Array.isArray(record.warnings)
+    ? record.warnings.filter((w): w is string => typeof w === "string")
+    : [];
+
+  return {
+    run_id: asStringOrNull(record.run_id) ?? jobId,
+    report_available: record.report_available === true,
+    audit_lines: auditLines,
+    citation_audit: citationAudit,
+    claim_audit: claimAudit,
+    metric_audit: metricAudit,
+    warnings,
+  };
 }
